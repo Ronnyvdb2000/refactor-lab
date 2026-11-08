@@ -1,0 +1,338 @@
+name: XGBoostV3 Scoring — top nieuwe selecties naar Telegram en mail — dagelijks
+
+on:
+  schedule:
+    - cron: "30 21 * * 1-5"
+
+  workflow_dispatch:
+
+jobs:
+  score-selecties:
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: read
+
+    steps:
+
+      # ======================================================
+      # CHECKOUT
+      # ======================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # ======================================================
+      # PYTHON
+      # ======================================================
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      # ======================================================
+      # DEPENDENCIES
+      # ======================================================
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python -m pip install --upgrade pip
+
+          pip install \
+            --retries 10 \
+            --timeout 60 \
+            --only-binary=:all: \
+            xgboost==3.2.0 \
+            pandas \
+            scikit-learn \
+            joblib \
+            psycopg2-binary \
+            requests
+
+      # ======================================================
+      # MODELFILES CONTROLEREN
+      # ======================================================
+
+      - name: Controleer beschikbare XGBoostV3 modellen
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo ""
+          echo "=================================================="
+          echo "XGBOOSTV3 MODELFILES"
+          echo "=================================================="
+
+          geldig=0
+
+          for f in \
+            xgboostV3_10d_model.pkl \
+            xgboostV3_30d_model.pkl \
+            xgboostV3_60d_model.pkl
+          do
+
+            if [ -f "$f" ]; then
+
+              grootte=$(stat -c%s "$f")
+
+              echo ""
+              echo "$f"
+              echo "  Grootte: $grootte bytes"
+
+              if [ "$grootte" -lt 1000 ]; then
+
+                echo "  ❌ Ongeldig: kleiner dan 1000 bytes"
+
+              else
+
+                echo "  ✅ Bestand aanwezig"
+                geldig=$((geldig + 1))
+
+              fi
+
+            else
+
+              echo ""
+              echo "$f"
+              echo "  ⏳ Niet aanwezig"
+
+            fi
+
+          done
+
+          echo ""
+          echo "=================================================="
+          echo "BESCHIKBARE MODELFILES: $geldig / 3"
+          echo "=================================================="
+
+          if [ "$geldig" -eq 0 ]; then
+
+            echo ""
+            echo "❌ Geen enkel modelbestand beschikbaar."
+            echo "Scoring kan niet worden uitgevoerd."
+
+            exit 1
+
+          fi
+
+          echo ""
+          echo "✅ Minstens één modelbestand beschikbaar."
+
+      # ======================================================
+      # ECHTE MODELVALIDATIE
+      # ======================================================
+
+      - name: Valideer XGBoostV3 modellen
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python <<'PY'
+
+          import os
+          import sys
+          import joblib
+          import xgboost
+
+
+          modellen = [
+              "xgboostV3_10d_model.pkl",
+              "xgboostV3_30d_model.pkl",
+              "xgboostV3_60d_model.pkl",
+          ]
+
+
+          verwachte_features = [
+              "atr14",
+              "atr14_pct",
+              "rsi14",
+              "ibs",
+              "ma50",
+              "ma200",
+              "pct_from_ma50",
+              "pct_from_ma200",
+              "vol_ratio_20d",
+              "high52w",
+              "pct_from_high52w",
+          ]
+
+
+          geldig = 0
+
+
+          print("")
+          print("=" * 70)
+          print("ECHTE VALIDATIE VAN XGBOOSTV3 MODELFILES")
+          print("=" * 70)
+
+          print("")
+          print(
+              f"XGBoost versie: "
+              f"{xgboost.__version__}"
+          )
+
+
+          for bestand in modellen:
+
+              print("")
+              print(f"[CONTROLE] {bestand}")
+
+              if not os.path.exists(bestand):
+
+                  print(
+                      "  ⏳ Niet aanwezig — toegestaan."
+                  )
+
+                  continue
+
+
+              grootte = os.path.getsize(bestand)
+
+              print(
+                  f"  Grootte: "
+                  f"{grootte:,} bytes"
+              )
+
+
+              if grootte < 1000:
+
+                  print(
+                      "  ⚠️ Ongeldig/placeholderbestand — "
+                      "wordt overgeslagen."
+                  )
+
+                  continue
+
+
+              try:
+
+                  model = joblib.load(bestand)
+
+              except Exception as exc:
+
+                  print(
+                      f"  ❌ joblib.load() mislukt: "
+                      f"{exc}"
+                  )
+
+                  continue
+
+
+              if not hasattr(
+                  model,
+                  "predict_proba",
+              ):
+
+                  print(
+                      "  ❌ Geen predict_proba()."
+                  )
+
+                  continue
+
+
+              if not hasattr(
+                  model,
+                  "feature_names_in_",
+              ):
+
+                  print(
+                      "  ❌ Geen feature_names_in_()."
+                  )
+
+                  continue
+
+
+              echte_features = list(
+                  model.feature_names_in_
+              )
+
+
+              if echte_features != verwachte_features:
+
+                  print(
+                      "  ❌ Verkeerde "
+                      "features/featurevolgorde."
+                  )
+
+                  print(
+                      f"  Verwacht: "
+                      f"{verwachte_features}"
+                  )
+
+                  print(
+                      f"  Gevonden: "
+                      f"{echte_features}"
+                  )
+
+                  continue
+
+
+              print(
+                  "  ✅ Geldig model."
+              )
+
+              geldig += 1
+
+
+          print("")
+          print("=" * 70)
+          print(
+              f"GELDIGE MODELLEN: "
+              f"{geldig} / 3"
+          )
+          print("=" * 70)
+
+
+          if geldig == 0:
+
+              print("")
+              print(
+                  "❌ Geen enkel geldig model."
+              )
+
+              print(
+                  "Scoring wordt gestopt."
+              )
+
+              sys.exit(1)
+
+
+          print("")
+          print(
+              "✅ Minstens één geldig model "
+              "beschikbaar."
+          )
+
+          PY
+
+      # ======================================================
+      # SCORE NIEUWE SELECTIES
+      # ======================================================
+
+      - name: Run score_xgboost
+        env:
+
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
+
+          TOP_N: "10"
+          LOOKBACK_DAGEN: "3"
+
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python score_xgboost.py
